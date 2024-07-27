@@ -2,8 +2,6 @@ import socket
 from threading import Thread
 import argparse
 from pathlib import Path
-import gzip
-from io import BytesIO
 
 RN = b"\r\n"
 
@@ -69,12 +67,6 @@ def parse_request(conn):
     d["body"] = b"".join(body)
     return d
 
-def compress_body(body: bytes) -> bytes:
-    buf = BytesIO()
-    with gzip.GzipFile(fileobj=buf, mode="wb") as f:
-        f.write(body)
-    return buf.getvalue()
-
 def req_handler(conn, dir_):
     with conn:
         d = parse_request(conn)
@@ -90,10 +82,9 @@ def req_handler(conn, dir_):
                 b"HTTP/1.1 200 OK\r\n",
                 b"Content-Type: text/plain\r\n",
             ]
-            if encoding := headers.get("accept-encoding", None):
-                if "gzip" in encoding:
-                    response_headers.append(b"Content-Encoding: gzip\r\n")
-                    body = compress_body(body)  # Compress body
+            encoding_header = headers.get("accept-encoding", "")
+            if "gzip" in encoding_header.split(", "):
+                response_headers.append(b"Content-Encoding: gzip\r\n")
             response_headers.append(f"Content-Length: {len(body)}\r\n".encode())
             response_headers.append(RN)
             
