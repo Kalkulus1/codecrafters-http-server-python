@@ -9,8 +9,24 @@ def main():
     # Uncomment this to pass the first stage
     #
     server_socket = socket.create_server(("localhost", 4221), reuse_port=True)
-    sock, addr = server_socket.accept()
-    sock.sendall(b"HTTP/1.1 200 OK\r\n\r\n")
+    
+    while True:
+        sock, addr = server_socket.accept()
+        with sock:
+            request = sock.recv(1024).decode('utf-8')
+            print(f"Received request: {request}")
+
+            # Parse the request line
+            request_line = request.split("\r\n")[0]
+            method, path, _ = request_line.split()
+
+            # Determine the response
+            if path == "/":
+                response = "HTTP/1.1 200 OK\r\n\r\n"
+            else:
+                response = "HTTP/1.1 404 Not Found\r\n\r\n"
+            
+            sock.sendall(response.encode('utf-8'))
 
 
 if __name__ == "__main__":
