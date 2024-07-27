@@ -2,6 +2,8 @@ import socket
 from threading import Thread
 import argparse
 from pathlib import Path
+import gzip
+from io import BytesIO
 
 RN = b"\r\n"
 
@@ -67,6 +69,12 @@ def parse_request(conn):
     d["body"] = b"".join(body)
     return d
 
+def compress_gzip(data: bytes) -> bytes:
+    buf = BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode='wb') as gz:
+        gz.write(data)
+    return buf.getvalue()
+
 def req_handler(conn, dir_):
     with conn:
         d = parse_request(conn)
@@ -78,18 +86,27 @@ def req_handler(conn, dir_):
             conn.sendall(b"HTTP/1.1 200 OK\r\n\r\n")
         elif url.startswith("/echo/"):
             body = url[6:].encode()
-            response_headers = [
-                b"HTTP/1.1 200 OK\r\n",
-                b"Content-Type: text/plain\r\n",
-            ]
             encoding_header = headers.get("accept-encoding", "")
             if "gzip" in encoding_header.split(", "):
-                response_headers.append(b"Content-Encoding: gzip\r\n")
-            response_headers.append(f"Content-Length: {len(body)}\r\n".encode())
-            response_headers.append(RN)
-            
-            conn.sendall(b"".join(response_headers))
-            conn.sendall(body)
+                compressed_body = compress_gzip(body)
+                response_headers = [
+                    b"HTTP/1.1 200 OK\r\n",
+                    b"Content-Type: text/plain\r\n",
+                    b"Content-Encoding: gzip\r\n",
+                    f"Content-Length: {len(compressed_body)}\r\n".encode(),
+                    RN
+                ]
+                conn.sendall(b"".join(response_headers))
+                conn.sendall(compressed_body)
+            else:
+                response_headers = [
+                    b"HTTP/1.1 200 OK\r\n",
+                    b"Content-Type: text/plain\r\n",
+                    f"Content-Length: {len(body)}\r\n".encode(),
+                    RN
+                ]
+                conn.sendall(b"".join(response_headers))
+                conn.sendall(body)
         elif url == "/user-agent":
             user_agent = headers.get("user-agent", "").encode()
             conn.send(b"HTTP/1.1 200 OK\r\n")
