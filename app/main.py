@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+"""Code written by Kalkulus (https://github.com/Kalkulus1) for CodeCrafters.io."""
 import socket
 from threading import Thread
 import argparse
