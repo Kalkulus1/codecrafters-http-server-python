@@ -14,8 +14,20 @@ def handle_client(sock, directory):
         method, path, _ = request_line.split()
         headers = {key: value for (key, value) in (line.split(": ", 1) for line in lines[1:] if ": " in line)}
 
-        # Check for the /files/{filename} endpoint
-        if path.startswith("/files/"):
+        if method == "POST" and path.startswith("/files/"):
+            filename = path[len("/files/"):]
+            content_length = int(headers.get("Content-Length", 0))
+            if content_length > 0:
+                body = sock.recv(content_length).decode('utf-8')
+                file_path = os.path.join(directory, filename)
+                with open(file_path, 'w') as f:
+                    f.write(body)
+                response = "HTTP/1.1 201 Created\r\n\r\n"
+                sock.sendall(response.encode('utf-8'))
+            else:
+                response = "HTTP/1.1 400 Bad Request\r\n\r\n"
+                sock.sendall(response.encode('utf-8'))
+        elif method == "GET" and path.startswith("/files/"):
             filename = path[len("/files/"):]
             file_path = os.path.join(directory, filename)
             if os.path.exists(file_path) and os.path.isfile(file_path):
@@ -32,7 +44,7 @@ def handle_client(sock, directory):
             else:
                 response = "HTTP/1.1 404 Not Found\r\n\r\n"
                 sock.sendall(response.encode('utf-8'))
-        elif path == "/user-agent":
+        elif method == "GET" and path == "/user-agent":
             user_agent = headers.get("User-Agent", "")
             response_body = user_agent
             response = (
@@ -43,7 +55,7 @@ def handle_client(sock, directory):
                 f"{response_body}"
             )
             sock.sendall(response.encode('utf-8'))
-        elif path.startswith("/echo/"):
+        elif method == "GET" and path.startswith("/echo/"):
             response_body = path[len("/echo/"):]
             response = (
                 "HTTP/1.1 200 OK\r\n"
@@ -53,7 +65,7 @@ def handle_client(sock, directory):
                 f"{response_body}"
             )
             sock.sendall(response.encode('utf-8'))
-        elif path == "/":
+        elif method == "GET" and path == "/":
             response = "HTTP/1.1 200 OK\r\n\r\n"
             sock.sendall(response.encode('utf-8'))
         else:
