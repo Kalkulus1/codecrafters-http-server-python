@@ -4,97 +4,153 @@ import argparse
 from pathlib import Path
 import gzip
 from io import BytesIO
+from typing import Dict
 
-RN = b"\r\n"
+# Constants
+RN = b"\r\n"  # Carriage return and newline bytes for HTTP headers separation
 
-def parse_request(conn):
-    d = {}
+
+def parse_request(conn: socket.socket) -> Dict[str, any]:
+    """
+    Parses an HTTP request from the client connection.
+
+    This function reads data from the provided socket connection and
+    parses the HTTP request into its components:
+    - request line (method, URL, and HTTP version)
+    - headers
+    - body (if present)
+
+    Args:
+        conn (socket.socket): The client connection to read from.
+
+    Returns:
+        Dict[str, any]: A dictionary containing:
+            - 'method': HTTP method (e.g., GET, POST)
+            - 'url': Request URL
+            - 'headers': HTTP headers as a dictionary
+            - 'body': Request body as bytes
+    """
+    request_data = {}
     headers = {}
-    body = []
-    target = 0  # request
-    rest = b""
-    ind = 0
-    body_len = 0
-    body_count = 0
+    body_chunks = []
+    target_phase = 0  # 0: request line, 1: headers, 2: body
+    remaining_data = b""
+    body_length = 0
+    body_received = 0
+
     while data := conn.recv(1024):
-        if rest:
-            data = rest + data
-            rest = b""
-        if target == 0:
-            ind = data.find(RN)
-            if ind == -1:
-                rest = data
+        if remaining_data:
+            data = remaining_data + data
+            remaining_data = b""
+
+        if target_phase == 0:
+            # Process the request line (e.g., GET /path HTTP/1.1)
+            header_end_idx = data.find(RN)
+            if header_end_idx == -1:
+                remaining_data = data
                 continue
-            # GET URL HTTP
-            line = data[:ind].decode()
-            data = data[ind + 2 :]
-            d["request"] = line
-            l = line.split()
-            d["method"] = l[0]  # GET, POST
-            d["url"] = l[1]
-            target = 1  # headers
-        if target == 1:
+
+            request_line = data[:header_end_idx].decode()
+            data = data[header_end_idx + 2 :]
+            request_data["request"] = request_line
+            method, url, _ = request_line.split()
+            request_data["method"] = method
+            request_data["url"] = url
+            target_phase = 1  # Move to headers
+
+        if target_phase == 1:
             if not data:
                 continue
+
             while True:
-                ind = data.find(RN)
-                if ind == -1:
-                    rest = data
+                header_end_idx = data.find(RN)
+                if header_end_idx == -1:
+                    remaining_data = data
                     break
-                if ind == 0:  # \r\n\r\n
-                    data = data[ind + 2 :]
-                    target = 2
+
+                if header_end_idx == 0:  # End of headers section
+                    data = data[header_end_idx + 2 :]
+                    target_phase = 2
                     break
-                line = data[:ind].decode()
-                data = data[ind + 2 :]
-                l = line.split(":", maxsplit=1)
-                field = l[0]
-                value = l[1].strip()
-                headers[field.lower()] = value
-            if target == 1:
+
+                header_line = data[:header_end_idx].decode()
+                data = data[header_end_idx + 2 :]
+                if ":" in header_line:
+                    key, value = header_line.split(":", maxsplit=1)
+                    headers[key.strip().lower()] = value.strip()
+
+            if target_phase == 1:
                 continue
-        if target == 2:
+
+        if target_phase == 2:
             if "content-length" not in headers:
                 break
-            body_len = int(headers["content-length"])
-            if not body_len:
+
+            body_length = int(headers["content-length"])
+            if not body_length:
                 break
-            target = 3
-        if target == 3:
-            body.append(data)
-            body_count += len(data)
-            if body_count >= body_len:
+
+            target_phase = 3
+
+        if target_phase == 3:
+            body_chunks.append(data)
+            body_received += len(data)
+            if body_received >= body_length:
                 break
-    d["headers"] = headers
-    d["body"] = b"".join(body)
-    return d
+
+    request_data["headers"] = headers
+    request_data["body"] = b"".join(body_chunks)
+    return request_data
+
 
 def compress_gzip(data: bytes) -> bytes:
-    buf = BytesIO()
-    with gzip.GzipFile(fileobj=buf, mode='wb') as gz:
-        gz.write(data)
-    return buf.getvalue()
+    """
+    Compresses the given data using gzip compression.
 
-def req_handler(conn, dir_):
+    Args:
+        data (bytes): The data to be compressed.
+
+    Returns:
+        bytes: The gzip-compressed data.
+    """
+    buffer = BytesIO()
+    with gzip.GzipFile(fileobj=buffer, mode="wb") as gz_file:
+        gz_file.write(data)
+    return buffer.getvalue()
+
+
+def handle_request(conn: socket.socket, dir_path: str) -> None:
+    """
+    Handles an incoming HTTP request and sends the appropriate response.
+
+    This function reads the HTTP request from the connection, processes it,
+    and sends back a response. The response may include gzip compression
+    based on the `Accept-Encoding` header.
+
+    Args:
+        conn (socket.socket): The client connection.
+        dir_path (str): The directory from which to serve files.
+    """
     with conn:
-        d = parse_request(conn)
-        url = d["url"]
-        method = d["method"]
-        headers = d["headers"]
+        request_data = parse_request(conn)
+        url = request_data["url"]
+        method = request_data["method"]
+        headers = request_data["headers"]
+        body = request_data["body"]
 
         if url == "/":
             conn.sendall(b"HTTP/1.1 200 OK\r\n\r\n")
         elif url.startswith("/echo/"):
-            body = url[6:].encode()
-            encoding_header = headers.get("accept-encoding", "")
-            if "gzip" in encoding_header.split(", "):
-                compressed_body = compress_gzip(body)
+            response_body = url[6:].encode()
+            accept_encoding = headers.get("accept-encoding", "")
+            if "gzip" in accept_encoding.split(", "):
+                compressed_body = compress_gzip(response_body)
                 response_headers = [
                     b"HTTP/1.1 200 OK\r\n",
                     b"Content-Type: text/plain\r\n",
                     b"Content-Encoding: gzip\r\n",
                     f"Content-Length: {len(compressed_body)}\r\n".encode(),
-                    RN
+                    RN,
                 ]
                 conn.sendall(b"".join(response_headers))
                 conn.sendall(compressed_body)
@@ -102,11 +158,11 @@ def req_handler(conn, dir_):
                 response_headers = [
                     b"HTTP/1.1 200 OK\r\n",
                     b"Content-Type: text/plain\r\n",
-                    f"Content-Length: {len(body)}\r\n".encode(),
-                    RN
+                    f"Content-Length: {len(response_body)}\r\n".encode(),
+                    RN,
                 ]
                 conn.sendall(b"".join(response_headers))
-                conn.sendall(body)
+                conn.sendall(response_body)
         elif url == "/user-agent":
             user_agent = headers.get("user-agent", "").encode()
             conn.send(b"HTTP/1.1 200 OK\r\n")
@@ -115,37 +171,52 @@ def req_handler(conn, dir_):
             conn.send(RN)
             conn.send(user_agent)
         elif url.startswith("/files/"):
-            file = Path(dir_) / url[7:]
+            file_path = Path(dir_path) / url[7:]
             if method == "GET":
-                if file.exists():
+                if file_path.exists():
                     conn.send(b"HTTP/1.1 200 OK\r\n")
                     conn.send(b"Content-Type: application/octet-stream\r\n")
-                    with open(file, "rb") as fp:
-                        body = fp.read()
-                    conn.send(f"Content-Length: {len(body)}\r\n".encode())
+                    with open(file_path, "rb") as file:
+                        file_body = file.read()
+                    conn.send(f"Content-Length: {len(file_body)}\r\n".encode())
                     conn.send(RN)
-                    conn.send(body)
+                    conn.send(file_body)
                 else:
                     conn.sendall(b"HTTP/1.1 404 Not Found\r\n\r\n")
             elif method == "POST":
-                with open(file, "wb") as fp:
-                    fp.write(d["body"])
+                with open(file_path, "wb") as file:
+                    file.write(body)
                 conn.send(b"HTTP/1.1 201 Created\r\n\r\n")
             else:
                 conn.sendall(b"HTTP/1.1 404 Not Found\r\n\r\n")
         else:
             conn.sendall(b"HTTP/1.1 404 Not Found\r\n\r\n")
 
-def main():
-    parser = argparse.ArgumentParser(description="socket server")
-    parser.add_argument(
-        "--directory", default=".", help="directory from which to get files"
+
+def main() -> None:
+    """
+    Starts the HTTP server and handles incoming connections.
+
+    This function sets up the server socket to listen for incoming connections
+    on localhost at port 4221. It then accepts incoming connections and spawns
+    a new thread to handle each request.
+    """
+    parser = argparse.ArgumentParser(
+        description="A simple HTTP server with gzip compression support."
     )
-    args = parser.parse_args()  # args.directory
+    parser.add_argument(
+        "--directory", default=".", help="Directory to serve files from"
+    )
+    args = parser.parse_args()
+
+    # Create a server socket
     server_socket = socket.create_server(("localhost", 4221), reuse_port=True)
+
+    # Accept incoming connections and handle them in separate threads
     while True:
-        conn, _ = server_socket.accept()  # wait for client
-        Thread(target=req_handler, args=(conn, args.directory)).start()
+        conn, _ = server_socket.accept()
+        Thread(target=handle_request, args=(conn, args.directory)).start()
+
 
 if __name__ == "__main__":
     main()
